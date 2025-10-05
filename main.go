@@ -155,6 +155,7 @@ func encodeImage(w io.Writer, img image.Image, format string) error {
 		return jpeg.Encode(w, img, nil)
 	case "png":
 		return png.Encode(w, img)
+	// Add other cases like "gif", etc., if needed
 	default:
 		return fmt.Errorf("unsupported image format: %s", format)
 	}
@@ -194,24 +195,58 @@ func (api *API) getSatImageByID(c *gin.Context) {
 	}
 	defer out.Body.Close()
 
-	img, format, err := image.Decode(out.Body)
-	if err != nil {
-		log.Printf("failed to decode image key=%s: %v", key, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
-		return
+	// if width and height are specified, resize the image, otherwise stream it directly for performance
+	if width > 0 && height > 0 {
+		img, format, err := image.Decode(out.Body)
+		if err != nil {
+			log.Printf("failed to decode image key=%s: %v", key, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
+			return
+		}
+
+		resizedImg := resize.Resize(uint(width), uint(height), img, resize.Lanczos3)
+
+		var buf bytes.Buffer
+		if err := encodeImage(&buf, resizedImg, format); err != nil {
+			log.Printf("failed to encode resized image key=%s: %v", key, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
+			return
+		}
+
+		c.Header("Content-Type", "image/"+format)
+		c.Header("Content-Length", strconv.Itoa(buf.Len()))
+		c.Header("Cache-Control", "private, max-age=3600")
+		c.Data(http.StatusOK, "image/"+format, buf.Bytes())
+
+	} else {
+		if out.ContentType != nil {
+			c.Header("Content-Type", aws.ToString(out.ContentType))
+		}
+		if out.ContentLength != nil {
+			c.Header("Content-Length", strconv.FormatInt(*out.ContentLength, 10))
+		}
+		if out.ETag != nil {
+			c.Header("ETag", aws.ToString(out.ETag))
+		}
+		if out.LastModified != nil {
+			c.Header("Last-Modified", out.LastModified.UTC().Format(http.TimeFormat))
+		}
+		if out.CacheControl != nil {
+			c.Header("Cache-Control", aws.ToString(out.CacheControl))
+		} else {
+			c.Header("Cache-Control", "private, max-age=60")
+		}
+		c.Header("Accept-Ranges", "bytes")
+
+		status := http.StatusOK
+		if out.ContentRange != nil {
+			c.Header("Content-Range", aws.ToString(out.ContentRange))
+			status = http.StatusPartialContent
+		}
+
+		c.Status(status)
+		if _, err := io.Copy(c.Writer, out.Body); err != nil {
+			log.Printf("error streaming key=%s: %v", key, err)
+		}
 	}
-
-	resizedImg := resize.Resize(uint(width), uint(height), img, resize.Lanczos3)
-
-	var buf bytes.Buffer
-	if err := encodeImage(&buf, resizedImg, format); err != nil {
-		log.Printf("failed to encode resized image key=%s: %v", key, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
-		return
-	}
-
-	c.Header("Content-Type", "image/"+format)
-	c.Header("Content-Length", strconv.Itoa(buf.Len()))
-	c.Header("Cache-Control", "private, max-age=3600")
-	c.Data(http.StatusOK, "image/"+format, buf.Bytes())
 }
