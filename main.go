@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -30,11 +32,19 @@ type API struct {
 }
 
 type Mission struct {
-	ID        string   `dynamodbav:"id" json:"id"`
-	Name      string   `dynamodbav:"name" json:"name"`
-	StartDate int64    `dynamodbav:"start_date" json:"start_date"`
-	Active    bool     `dynamodbav:"active" json:"active"`
-	ImageIDs  []string `dynamodbav:"image_ids" json:"image_ids"`
+	ID                    string   `dynamodbav:"id" json:"id"`
+	Name                  string   `dynamodbav:"name" json:"name"`
+	Status                string   `dynamodbav:"status" json:"status"`
+	Priority              int      `dynamodbav:"priority" json:"priority"`
+	TargetSatelliteID     string   `dynamodbav:"target_satellite_id" json:"target_satellite_id"`
+	ObserverSatelliteID   string   `dynamodbav:"observer_satellite_id" json:"observer_satellite_id"`
+	TCA                   int64    `dynamodbav:"tca" json:"tca"`
+	MinRangeKM            float64  `dynamodbav:"min_range_km" json:"min_range_km"`
+	CollectionWindowStart int64    `dynamodbav:"collection_window_start" json:"collection_window_start"`
+	CollectionWindowEnd   int64    `dynamodbav:"collection_window_end" json:"collection_window_end"`
+	CollectionType        string   `dynamodbav:"collection_type" json:"collection_type"`
+	PointingTarget        string   `dynamodbav:"pointing_target" json:"pointing_target"`
+	ImageIDs              []string `dynamodbav:"image_ids" json:"image_ids"`
 }
 
 func initEnv() {
@@ -78,7 +88,7 @@ func main() {
 	router.GET("/mission/:id", api.getMissionById)
 	router.GET("/image/:id", api.getSatImageByID)
 
-	router.Run("localhost:8080")
+	router.Run(":8080")
 }
 
 func ping(c *gin.Context) {
@@ -87,34 +97,69 @@ func ping(c *gin.Context) {
 	})
 }
 
+type PaginatedMissionsResponse struct {
+	Missions  []Mission `json:"missions"`
+	NextToken *string   `json:"nextToken,omitempty"`
+}
+
 func (api *API) getMissions(c *gin.Context) {
 	tableName := os.Getenv("MISSION_TABLE")
+	limit := int32(100) // Max entries per page
 
-	paginator := dynamodb.NewScanPaginator(api.DB, &dynamodb.ScanInput{
+	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(tableName),
-	})
-
-	var allItems []Mission
-
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(context.TODO())
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve missions"})
-			return
-		}
-
-		var pagedItems []Mission
-
-		err = attributevalue.UnmarshalListOfMaps(page.Items, &pagedItems)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve missions"})
-			return
-		}
-
-		allItems = append(allItems, pagedItems...)
+		Limit:     aws.Int32(limit),
 	}
 
-	c.IndentedJSON(http.StatusOK, allItems)
+	token := c.Query("nextToken")
+	if token != "" {
+		decodedToken, err := base64.StdEncoding.DecodeString(token)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pagination token"})
+			return
+		}
+
+		var exclusiveStartKey map[string]types.AttributeValue
+		if err := json.Unmarshal(decodedToken, &exclusiveStartKey); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pagination token format"})
+			return
+		}
+		scanInput.ExclusiveStartKey = exclusiveStartKey
+	}
+
+	output, err := api.DB.Scan(c.Request.Context(), scanInput)
+	if err != nil {
+		log.Printf("DynamoDB scan failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve missions"})
+		return
+	}
+
+	var missions []Mission
+	err = attributevalue.UnmarshalListOfMaps(output.Items, &missions)
+	if err != nil {
+		log.Printf("Failed to unmarshal missions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process mission data"})
+		return
+	}
+
+	var nextToken *string
+	if len(output.LastEvaluatedKey) > 0 {
+		jsonKey, err := json.Marshal(output.LastEvaluatedKey)
+		if err != nil {
+			log.Printf("Failed to marshal LastEvaluatedKey: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare pagination token"})
+			return
+		}
+		encodedToken := base64.StdEncoding.EncodeToString(jsonKey)
+		nextToken = aws.String(encodedToken)
+	}
+
+	response := PaginatedMissionsResponse{
+		Missions:  missions,
+		NextToken: nextToken,
+	}
+
+	c.IndentedJSON(http.StatusOK, response)
 }
 
 func (api *API) getMissionById(c *gin.Context) {
@@ -155,7 +200,6 @@ func encodeImage(w io.Writer, img image.Image, format string) error {
 		return jpeg.Encode(w, img, nil)
 	case "png":
 		return png.Encode(w, img)
-	// Add other cases like "gif", etc., if needed
 	default:
 		return fmt.Errorf("unsupported image format: %s", format)
 	}
@@ -169,7 +213,7 @@ func (api *API) getSatImageByID(c *gin.Context) {
 		return
 	}
 
-	key := fmt.Sprintf("%s.jpg", id)
+	key := fmt.Sprintf("images/%s.jpg", id)
 
 	widthStr := c.Query("width")
 	heightStr := c.Query("height")
