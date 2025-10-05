@@ -22,7 +22,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	"github.com/nfnt/resize"
 )
 
@@ -47,13 +46,6 @@ type Mission struct {
 	ImageIDs              []string `dynamodbav:"image_ids" json:"image_ids"`
 }
 
-func initEnv() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
-	}
-}
-
 func initDB() *dynamodb.Client {
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
@@ -74,8 +66,6 @@ func initS3() *s3.Client {
 }
 
 func main() {
-	initEnv()
-
 	api := &API{
 		DB: initDB(),
 		S3: initS3(),
@@ -104,7 +94,7 @@ type PaginatedMissionsResponse struct {
 
 func (api *API) getMissions(c *gin.Context) {
 	tableName := os.Getenv("MISSION_TABLE")
-	limit := int32(100) // Max entries per page
+	limit := int32(100)
 
 	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(tableName),
