@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/nfnt/resize"
 )
 
 type API struct {
@@ -74,7 +79,6 @@ func main() {
 	router.GET("/image/:id", api.getSatImageByID)
 
 	router.Run("localhost:8080")
-
 }
 
 func ping(c *gin.Context) {
@@ -145,6 +149,17 @@ func (api *API) getMissionById(c *gin.Context) {
 	c.IndentedJSON(http.StatusOK, mission)
 }
 
+func encodeImage(w io.Writer, img image.Image, format string) error {
+	switch format {
+	case "jpeg":
+		return jpeg.Encode(w, img, nil)
+	case "png":
+		return png.Encode(w, img)
+	default:
+		return fmt.Errorf("unsupported image format: %s", format)
+	}
+}
+
 func (api *API) getSatImageByID(c *gin.Context) {
 	bucketName := os.Getenv("SAT_IMAGES_BUCKET")
 	id := c.Param("id")
@@ -155,12 +170,20 @@ func (api *API) getSatImageByID(c *gin.Context) {
 
 	key := fmt.Sprintf("%s.jpg", id)
 
+	widthStr := c.Query("width")
+	heightStr := c.Query("height")
+	width, _ := strconv.Atoi(widthStr)
+	height, _ := strconv.Atoi(heightStr)
+
 	in := &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(key),
 	}
-	if rng := c.GetHeader("Range"); rng != "" {
-		in.Range = aws.String(rng)
+
+	if width <= 0 && height <= 0 {
+		if rng := c.GetHeader("Range"); rng != "" {
+			in.Range = aws.String(rng)
+		}
 	}
 
 	out, err := api.S3.GetObject(c.Request.Context(), in)
@@ -171,32 +194,24 @@ func (api *API) getSatImageByID(c *gin.Context) {
 	}
 	defer out.Body.Close()
 
-	if out.ContentType != nil {
-		c.Header("Content-Type", aws.ToString(out.ContentType))
-	}
-	if out.ContentLength != nil {
-		c.Header("Content-Length", strconv.FormatInt(*out.ContentLength, 10))
-	}
-	if out.ETag != nil {
-		c.Header("ETag", aws.ToString(out.ETag))
-	}
-	if out.LastModified != nil {
-		c.Header("Last-Modified", out.LastModified.UTC().Format(http.TimeFormat))
-	}
-	if out.CacheControl != nil {
-		c.Header("Cache-Control", aws.ToString(out.CacheControl))
-	} else {
-		c.Header("Cache-Control", "private, max-age=60")
-	}
-	c.Header("Accept-Ranges", "bytes")
-	if out.ContentRange != nil {
-		c.Header("Content-Range", aws.ToString(out.ContentRange))
-		c.Status(http.StatusPartialContent)
-	} else {
-		c.Status(http.StatusOK)
+	img, format, err := image.Decode(out.Body)
+	if err != nil {
+		log.Printf("failed to decode image key=%s: %v", key, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
+		return
 	}
 
-	if _, err := io.Copy(c.Writer, out.Body); err != nil {
-		log.Printf("error streaming key=%s: %v", key, err)
+	resizedImg := resize.Resize(uint(width), uint(height), img, resize.Lanczos3)
+
+	var buf bytes.Buffer
+	if err := encodeImage(&buf, resizedImg, format); err != nil {
+		log.Printf("failed to encode resized image key=%s: %v", key, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
+		return
 	}
+
+	c.Header("Content-Type", "image/"+format)
+	c.Header("Content-Length", strconv.Itoa(buf.Len()))
+	c.Header("Cache-Control", "private, max-age=3600")
+	c.Data(http.StatusOK, "image/"+format, buf.Bytes())
 }
