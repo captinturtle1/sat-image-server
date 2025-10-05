@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -69,7 +70,8 @@ func main() {
 
 	router.GET("/ping", ping)
 	router.GET("/missions", api.getMissions)
-	router.GET("/images/:id", api.getSatImageByID)
+	router.GET("/mission/:id", api.getMissionById)
+	router.GET("/image/:id", api.getSatImageByID)
 
 	router.Run("localhost:8080")
 
@@ -83,8 +85,6 @@ func ping(c *gin.Context) {
 
 func (api *API) getMissions(c *gin.Context) {
 	tableName := os.Getenv("MISSION_TABLE")
-
-	println(tableName)
 
 	paginator := dynamodb.NewScanPaginator(api.DB, &dynamodb.ScanInput{
 		TableName: aws.String(tableName),
@@ -111,6 +111,38 @@ func (api *API) getMissions(c *gin.Context) {
 	}
 
 	c.IndentedJSON(http.StatusOK, allItems)
+}
+
+func (api *API) getMissionById(c *gin.Context) {
+	tableName := os.Getenv("MISSION_TABLE")
+
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing id"})
+		return
+	}
+
+	out, err := api.DB.GetItem(c.Request.Context(), &dynamodb.GetItemInput{
+		TableName: aws.String(tableName),
+		Key: map[string]types.AttributeValue{
+			"id": &types.AttributeValueMemberS{Value: id},
+		},
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve mission"})
+		return
+	}
+	if out.Item == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "mission not found"})
+		return
+	}
+	var mission Mission
+	err = attributevalue.UnmarshalMap(out.Item, &mission)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve mission"})
+		return
+	}
+	c.IndentedJSON(http.StatusOK, mission)
 }
 
 func (api *API) getSatImageByID(c *gin.Context) {
