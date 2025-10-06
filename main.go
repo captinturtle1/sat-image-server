@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/jpeg"
-	"image/png"
 	"io"
 	"log"
 	"net/http"
@@ -233,17 +231,6 @@ func (api *API) getMissionById(c *gin.Context) {
 		return
 	}
 	c.IndentedJSON(http.StatusOK, mission)
-}
-
-func encodeImage(w io.Writer, img image.Image, format string) error {
-	switch format {
-	case "jpeg":
-		return jpeg.Encode(w, img, nil)
-	case "png":
-		return png.Encode(w, img)
-	default:
-		return fmt.Errorf("unsupported image format: %s", format)
-	}
 }
 
 func (api *API) getSatImageByID(c *gin.Context) {
