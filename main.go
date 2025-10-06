@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -21,9 +20,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/disintegration/imaging"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/nfnt/resize"
 )
 
 type API struct {
@@ -259,15 +258,20 @@ func (api *API) getSatImageByID(c *gin.Context) {
 
 	widthStr := c.Query("width")
 	heightStr := c.Query("height")
+	contrastStr := c.Query("contrast")
+
 	width, _ := strconv.Atoi(widthStr)
 	height, _ := strconv.Atoi(heightStr)
+	contrast, _ := strconv.ParseFloat(contrastStr, 64)
+
+	needsProcessing := width > 0 || height > 0 || contrast != 0
 
 	in := &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(key),
 	}
 
-	if width <= 0 && height <= 0 {
+	if !needsProcessing {
 		if rng := c.GetHeader("Range"); rng != "" {
 			in.Range = aws.String(rng)
 		}
@@ -281,28 +285,31 @@ func (api *API) getSatImageByID(c *gin.Context) {
 	}
 	defer out.Body.Close()
 
-	// if width and height are specified, resize the image, otherwise stream it directly for performance
-	if width > 0 && height > 0 {
-		img, format, err := image.Decode(out.Body)
+	if needsProcessing {
+		srcImage, err := imaging.Decode(out.Body)
 		if err != nil {
 			log.Printf("failed to decode image key=%s: %v", key, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
 			return
 		}
 
-		resizedImg := resize.Resize(uint(width), uint(height), img, resize.Lanczos3)
+		var processedImage image.Image = srcImage
 
-		var buf bytes.Buffer
-		if err := encodeImage(&buf, resizedImg, format); err != nil {
-			log.Printf("failed to encode resized image key=%s: %v", key, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process image"})
-			return
+		if width > 0 || height > 0 {
+			processedImage = imaging.Resize(processedImage, width, height, imaging.Lanczos)
 		}
 
-		c.Header("Content-Type", "image/"+format)
-		c.Header("Content-Length", strconv.Itoa(buf.Len()))
+		if contrast != 0 {
+			processedImage = imaging.AdjustContrast(processedImage, contrast)
+		}
+
+		c.Header("Content-Type", "image/jpeg")
 		c.Header("Cache-Control", "private, max-age=3600")
-		c.Data(http.StatusOK, "image/"+format, buf.Bytes())
+
+		err = imaging.Encode(c.Writer, processedImage, imaging.JPEG, imaging.JPEGQuality(95))
+		if err != nil {
+			log.Printf("failed to encode and write image key=%s: %v", key, err)
+		}
 
 	} else {
 		if out.ContentType != nil {
