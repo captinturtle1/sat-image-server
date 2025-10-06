@@ -104,7 +104,24 @@ type PaginatedMissionsResponse struct {
 
 func (api *API) getMissions(c *gin.Context) {
 	tableName := os.Getenv("MISSION_TABLE")
-	limit := int32(100)
+
+	limit := int32(10)
+	const maxLimit = 100
+
+	countStr := c.Query("count")
+	if countStr != "" {
+		parsedCount, err := strconv.ParseInt(countStr, 10, 32)
+		if err != nil || parsedCount <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 'count' parameter. Must be a positive integer."})
+			return
+		}
+
+		limit = int32(parsedCount)
+
+		if limit > maxLimit {
+			limit = maxLimit
+		}
+	}
 
 	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(tableName),
@@ -112,6 +129,7 @@ func (api *API) getMissions(c *gin.Context) {
 	}
 
 	token := c.Query("nextToken")
+
 	if token != "" {
 		decodedToken, err := base64.StdEncoding.DecodeString(token)
 		if err != nil {
@@ -119,12 +137,25 @@ func (api *API) getMissions(c *gin.Context) {
 			return
 		}
 
-		var exclusiveStartKey map[string]types.AttributeValue
-		if err := json.Unmarshal(decodedToken, &exclusiveStartKey); err != nil {
+		var tempKey map[string]map[string]string
+		if err := json.Unmarshal(decodedToken, &tempKey); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pagination token format"})
 			return
 		}
+
+		exclusiveStartKey := make(map[string]types.AttributeValue)
+		for key, valMap := range tempKey {
+			for typeIdentifier, value := range valMap {
+				switch typeIdentifier {
+				case "S":
+					exclusiveStartKey[key] = &types.AttributeValueMemberS{Value: value}
+				case "N":
+					exclusiveStartKey[key] = &types.AttributeValueMemberN{Value: value}
+				}
+			}
+		}
 		scanInput.ExclusiveStartKey = exclusiveStartKey
+
 	}
 
 	output, err := api.DB.Scan(c.Request.Context(), scanInput)
@@ -144,12 +175,23 @@ func (api *API) getMissions(c *gin.Context) {
 
 	var nextToken *string
 	if len(output.LastEvaluatedKey) > 0 {
-		jsonKey, err := json.Marshal(output.LastEvaluatedKey)
+		serializableKey := make(map[string]interface{})
+		for key, val := range output.LastEvaluatedKey {
+			switch v := val.(type) {
+			case *types.AttributeValueMemberS:
+				serializableKey[key] = map[string]string{"S": v.Value}
+			case *types.AttributeValueMemberN:
+				serializableKey[key] = map[string]string{"N": v.Value}
+			}
+		}
+
+		jsonKey, err := json.Marshal(serializableKey)
 		if err != nil {
 			log.Printf("Failed to marshal LastEvaluatedKey: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare pagination token"})
 			return
 		}
+
 		encodedToken := base64.StdEncoding.EncodeToString(jsonKey)
 		nextToken = aws.String(encodedToken)
 	}
