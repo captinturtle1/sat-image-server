@@ -1,6 +1,6 @@
 # sat-image-server
 
-A simple and efficient REST API built with Go and the Gin framework to manage satellite mission data. This API interacts with AWS services, using DynamoDB for data storage and S3 for satellite image assets.
+A simple REST API built with Go and the Gin framework to manage satellite mission data. This API interacts with AWS services, using DynamoDB for data storage and S3 for satellite image assets.
 
 ## Prerequisites
 
@@ -86,12 +86,12 @@ docker run --rm -p 8080:8080 \
 
 The following endpoints are available:
 
-| Method | Endpoint       | Description                                                   |
-| ------ | -------------- | ------------------------------------------------------------- |
-| GET    | `/ping`        | A simple health check endpoint. Returns `{"message": "pong"}` |
-| GET    | `/missions`    | Retrieves a list of all missions from DynamoDB.               |
-| GET    | `/mission/:id` | Retrieves a single mission by its unique ID.                  |
-| GET    | `/image/:id`   | Retrieves a satellite image by its unique ID from S3.         |
+| Method | Endpoint       | Description                                                                 |
+| ------ | -------------- | --------------------------------------------------------------------------- |
+| GET    | `/ping`        | A simple health check endpoint. Returns `{"message": "pong"}`               |
+| GET    | `/missions`    | Retrieves a list of all missions from DynamoDB.                             |
+| GET    | `/mission/:id` | Retrieves a single mission by its unique ID.                                |
+| GET    | `/image/:id`   | Retrieves a satellite image by its unique ID from S3. Supports query params `width`, `height`, and `contrast`. |
 
 ### Example Response for `GET /mission/:id`
 
@@ -115,6 +115,19 @@ The following endpoints are available:
   ]
 }
 ```
+
+### GET /image/:id
+
+Retrieve a satellite image by its unique ID.
+
+**Path parameters**
+- `id` *(string, required)* — Unique image ID (e.g. `501aff0c-8bdf-4b07-abf8-9722cb3cd03b`).
+
+**Query parameters**
+- `width` *(integer, optional)* — Desired width in pixels. If provided, image will be resized to `width x height` (see `height`), preserving the requested dimension(s). Example: `?width=800`
+- `height` *(integer, optional)* — Desired height in pixels. If provided, image will be resized to `width x height`. Example: `?height=600`
+- `contrast` *(float, optional)* — Contrast adjustment applied to the image. Values are interpreted as percentage-like (positive increases contrast, negative reduces). Example: `?contrast=20` or `?contrast=-10`. Default: `0` (no change).
+
 
 ## Data Schema
 
